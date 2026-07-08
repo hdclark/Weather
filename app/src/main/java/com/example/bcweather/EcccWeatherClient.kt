@@ -7,6 +7,7 @@ import java.net.URL
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
+import java.time.format.DateTimeFormatter
 import kotlin.math.*
 
 class EcccWeatherClient {
@@ -28,8 +29,8 @@ class EcccWeatherClient {
         val buckets = mutableMapOf<Pair<LocalDate, DayPeriod>, MutableList<Triple<Double, Double, Double>>>()
         for (i in 0 until features.length()) {
             val p = features.getJSONObject(i).optJSONObject("properties") ?: continue
-            val timeText = p.optString("LOCAL_DATE", p.optString("datetime", p.optString("time"))).replace("Z", "")
-            val time = runCatching { LocalDateTime.parse(timeText.take(19)) }.getOrNull() ?: continue
+            val timeText = p.optString("LOCAL_DATE", p.optString("datetime", p.optString("time")))
+            val time = parseObservationTime(timeText) ?: continue
             val temp = firstNumber(p, "TEMP", "AIR_TEMPERATURE", "temperature") ?: continue
             val precip = firstNumber(p, "PRECIP_AMOUNT", "TOTAL_PRECIPITATION", "precipitation") ?: 0.0
             val wind = firstNumber(p, "WIND_SPEED", "wind_speed") ?: 0.0
@@ -39,6 +40,12 @@ class EcccWeatherClient {
         return buckets.map { (key, values) ->
             PeriodWeather(location.name, key.first, key.second, values.minOf { it.first }, values.maxOf { it.first }, values.sumOf { it.second }, values.maxOf { it.third }, !key.first.isAfter(LocalDate.now()))
         }.sortedWith(compareBy<PeriodWeather> { it.date }.thenBy { it.period.ordinal })
+    }
+
+    private fun parseObservationTime(value: String): LocalDateTime? {
+        val normalized = value.removeSuffix("Z").take(19)
+        return runCatching { LocalDateTime.parse(normalized) }.getOrNull()
+            ?: runCatching { LocalDateTime.parse(normalized, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")) }.getOrNull()
     }
 
     private fun firstNumber(obj: JSONObject, vararg names: String): Double? = names.firstNotNullOfOrNull { n -> obj.optDouble(n, Double.NaN).takeUnless { it.isNaN() } }
