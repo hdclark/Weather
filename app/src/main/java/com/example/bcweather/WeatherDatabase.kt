@@ -23,6 +23,7 @@ class WeatherDatabase(context: Context) : SQLiteOpenHelper(context, "weather_per
     fun replace(location: String, rows: List<PeriodWeather>) = writableDatabase.use { db ->
         db.beginTransaction()
         try {
+            db.delete("period_weather", "location=?", arrayOf(location))
             rows.forEach { r ->
                 db.replace("period_weather", null, ContentValues().apply {
                     put("location", r.location); put("date", r.date.toString()); put("period", r.period.name)

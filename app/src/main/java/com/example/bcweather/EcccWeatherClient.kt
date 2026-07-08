@@ -14,11 +14,13 @@ import kotlin.math.*
 
 class EcccWeatherClient {
     fun fetch(location: Location): List<PeriodWeather> {
-        val end = LocalDate.now().plusDays(3)
-        val start = LocalDate.now().minusDays(3)
+        val start = LocalDate.now(BC_ZONE).minusDays(3)
+        val end = LocalDate.now(BC_ZONE).plusDays(3)
+        val startUtc = start.atStartOfDay(BC_ZONE).withZoneSameInstant(ZoneOffset.UTC)
+        val endUtc = end.plusDays(1).atStartOfDay(BC_ZONE).minusNanos(1).withZoneSameInstant(ZoneOffset.UTC)
         // MSC GeoMet OGC API Features endpoint. The app requests hourly temperature, precipitation,
         // and wind values near the selected BC coordinate, then aggregates them into daylight-aware periods.
-        val url = URL("https://api.weather.gc.ca/collections/climate-hourly/items?f=json&limit=500&bbox=${location.lon - .25},${location.lat - .25},${location.lon + .25},${location.lat + .25}&datetime=${start}T00:00:00Z/${end}T23:00:00Z")
+        val url = URL("https://api.weather.gc.ca/collections/climate-hourly/items?f=json&limit=500&bbox=${location.lon - .25},${location.lat - .25},${location.lon + .25},${location.lat + .25}&datetime=${DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(startUtc)}/${DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(endUtc)}")
         val text = (url.openConnection() as HttpURLConnection).run {
             connectTimeout = 15000; readTimeout = 20000; requestMethod = "GET"
             inputStream.bufferedReader().use(BufferedReader::readText)
@@ -35,9 +37,10 @@ class EcccWeatherClient {
             val p = feature.optJSONObject("properties") ?: continue
             val timeText = p.optString("LOCAL_DATE", p.optString("datetime", p.optString("time")))
             val time = parseObservationTime(timeText) ?: continue
+            if (time.toLocalDate().isBefore(start) || time.toLocalDate().isAfter(end)) continue
             val temp = firstNumber(p, "TEMP", "AIR_TEMPERATURE", "temperature") ?: continue
-            val precip = firstNumber(p, "PRECIP_AMOUNT", "TOTAL_PRECIPITATION", "precipitation") ?: 0.0
-            val wind = firstNumber(p, "WIND_SPEED", "wind_speed") ?: 0.0
+            val precip = firstNumber(p, "PRECIP_AMOUNT", "TOTAL_PRECIPITATION", "precipitation") ?: continue
+            val wind = firstNumber(p, "WIND_SPEED", "wind_speed") ?: continue
             val station = stationKey(p, feature, i)
             observationsByStation.getOrPut(station) { mutableListOf() }.add(Observation(time, temp, precip, wind))
             stationDistance(location, feature)?.let { distance ->
@@ -82,7 +85,7 @@ class EcccWeatherClient {
 
     private fun toPeriodWeather(location: Location, date: LocalDate, period: DayPeriod, observations: List<Observation>?): PeriodWeather {
         if (observations.isNullOrEmpty()) {
-            return PeriodWeather(location.name, date, period, 0.0, 0.0, 0.0, 0.0, !date.isAfter(LocalDate.now()))
+            return PeriodWeather(location.name, date, period, 0.0, 0.0, 0.0, 0.0, false)
         }
         return PeriodWeather(
             location.name,
@@ -92,7 +95,7 @@ class EcccWeatherClient {
             observations.maxOf { it.tempC },
             observations.sumOf { it.precipitationMm },
             observations.maxOf { it.windKmh },
-            !date.isAfter(LocalDate.now()),
+            !date.isAfter(LocalDate.now(BC_ZONE)),
         )
     }
 
@@ -139,5 +142,5 @@ class EcccWeatherClient {
     }
 
     private fun syntheticEmpty(location: Location, start: LocalDate, end: LocalDate): List<PeriodWeather> = generateSequence(start) { it.plusDays(1).takeIf { d -> !d.isAfter(end) } }
-        .flatMap { d -> DayPeriod.entries.map { p -> PeriodWeather(location.name, d, p, 0.0, 0.0, 0.0, 0.0, !d.isAfter(LocalDate.now())) } }.toList()
+        .flatMap { d -> DayPeriod.entries.map { p -> PeriodWeather(location.name, d, p, 0.0, 0.0, 0.0, 0.0, false) } }.toList()
 }
