@@ -13,4 +13,5 @@ data class PeriodWeather(
     val precipitationMm: Double,
     val maxWindKmh: Double,
     val observed: Boolean,
+    val available: Boolean = observed,
 )
