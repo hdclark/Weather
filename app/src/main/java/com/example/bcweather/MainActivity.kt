@@ -18,11 +18,14 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         db = WeatherDatabase(this)
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(16, 16, 16, 16) }
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val scroll = ScrollView(this).apply { addView(content) }
         val spinner = Spinner(this).apply { adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, Locations.all.map { it.name }) }
         status = TextView(this)
         table = TableLayout(this).apply { stretchAllColumns = true; shrinkAllColumns = true }
         val export = Button(this).apply { text = "Export historical CSV"; setOnClickListener { exportCsv() } }
-        root.addView(spinner); root.addView(status); root.addView(table); root.addView(export)
+        content.addView(spinner); content.addView(status); content.addView(table); content.addView(export)
+        root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT))
         setContentView(root)
         spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: android.view.View?, position: Int, id: Long) { selected = Locations.all[position]; loadAndRefresh() }
@@ -41,8 +44,16 @@ class MainActivity : Activity() {
         val location = selected
         thread {
             runCatching { EcccWeatherClient().fetch(location) }
-                .onSuccess { rows -> db.replace(location.name, rows); runOnUiThread { status.text = "Updated ${location.name}"; render(db.load(location.name)) } }
-                .onFailure { e -> runOnUiThread { status.text = "Refresh failed: ${e.message}" } }
+                .onSuccess { rows ->
+                    db.replace(location.name, rows)
+                    runOnUiThread {
+                        if (selected == location) {
+                            status.text = "Updated ${location.name}"
+                            render(db.load(location.name))
+                        }
+                    }
+                }
+                .onFailure { e -> runOnUiThread { if (selected == location) status.text = "Refresh failed: ${e.message}" } }
         }
     }
 

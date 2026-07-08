@@ -7,6 +7,8 @@ import java.net.URL
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
+import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import kotlin.math.*
 
@@ -21,25 +23,38 @@ class EcccWeatherClient {
             connectTimeout = 15000; readTimeout = 20000; requestMethod = "GET"
             inputStream.bufferedReader().use(BufferedReader::readText)
         }
-        return parseGeoJson(location, text, start, end).ifEmpty { syntheticEmpty(location, start, end) }
+        return parseGeoJson(location, text, start, end)
     }
 
     private fun parseGeoJson(location: Location, json: String, start: LocalDate, end: LocalDate): List<PeriodWeather> {
-        val features = JSONObject(json).optJSONArray("features") ?: return emptyList()
-        val buckets = mutableMapOf<Pair<LocalDate, DayPeriod>, MutableList<Triple<Double, Double, Double>>>()
+        val features = JSONObject(json).optJSONArray("features") ?: return syntheticEmpty(location, start, end)
+        val observationsByStation = mutableMapOf<String, MutableList<Observation>>()
+        val distancesByStation = mutableMapOf<String, Double>()
         for (i in 0 until features.length()) {
-            val p = features.getJSONObject(i).optJSONObject("properties") ?: continue
+            val feature = features.getJSONObject(i)
+            val p = feature.optJSONObject("properties") ?: continue
             val timeText = p.optString("LOCAL_DATE", p.optString("datetime", p.optString("time")))
             val time = parseObservationTime(timeText) ?: continue
             val temp = firstNumber(p, "TEMP", "AIR_TEMPERATURE", "temperature") ?: continue
             val precip = firstNumber(p, "PRECIP_AMOUNT", "TOTAL_PRECIPITATION", "precipitation") ?: 0.0
             val wind = firstNumber(p, "WIND_SPEED", "wind_speed") ?: 0.0
-            val period = periodFor(location, time)
-            buckets.getOrPut(time.toLocalDate() to period) { mutableListOf() }.add(Triple(temp, precip, wind))
+            val station = stationKey(p, feature, i)
+            observationsByStation.getOrPut(station) { mutableListOf() }.add(Observation(time, temp, precip, wind))
+            stationDistance(location, feature)?.let { distance ->
+                distancesByStation[station] = minOf(distancesByStation[station] ?: Double.MAX_VALUE, distance)
+            }
         }
-        return buckets.map { (key, values) ->
-            PeriodWeather(location.name, key.first, key.second, values.minOf { it.first }, values.maxOf { it.first }, values.sumOf { it.second }, values.maxOf { it.third }, !key.first.isAfter(LocalDate.now()))
-        }.sortedWith(compareBy<PeriodWeather> { it.date }.thenBy { it.period.ordinal })
+        val stationObservations = observationsByStation.entries
+            .minWithOrNull(compareBy<Map.Entry<String, MutableList<Observation>>> { distancesByStation[it.key] ?: Double.MAX_VALUE }.thenByDescending { it.value.size })
+            ?.value
+            .orEmpty()
+        val buckets = mutableMapOf<Pair<LocalDate, DayPeriod>, MutableList<Observation>>()
+        stationObservations.forEach { observation ->
+            buckets.getOrPut(observation.time.toLocalDate() to periodFor(location, observation.time)) { mutableListOf() }.add(observation)
+        }
+        return generateSequence(start) { it.plusDays(1).takeIf { d -> !d.isAfter(end) } }
+            .flatMap { date -> DayPeriod.entries.map { period -> toPeriodWeather(location, date, period, buckets[date to period]) } }
+            .toList()
     }
 
     private fun parseObservationTime(value: String): LocalDateTime? {
@@ -49,6 +64,37 @@ class EcccWeatherClient {
     }
 
     private fun firstNumber(obj: JSONObject, vararg names: String): Double? = names.firstNotNullOfOrNull { n -> obj.optDouble(n, Double.NaN).takeUnless { it.isNaN() } }
+
+    private fun stationKey(properties: JSONObject, feature: JSONObject, index: Int): String =
+        listOf("CLIMATE_IDENTIFIER", "STATION_NAME", "station_name", "STN_ID", "station_id")
+            .firstNotNullOfOrNull { key -> properties.optString(key).takeIf { it.isNotBlank() } }
+            ?: feature.optString("id").takeIf { it.isNotBlank() }
+            ?: "feature-$index"
+
+    private fun stationDistance(location: Location, feature: JSONObject): Double? {
+        val coordinates = feature.optJSONObject("geometry")?.optJSONArray("coordinates") ?: return null
+        if (coordinates.length() < 2) return null
+        val lon = coordinates.optDouble(0, Double.NaN)
+        val lat = coordinates.optDouble(1, Double.NaN)
+        if (lon.isNaN() || lat.isNaN()) return null
+        return hypot(location.lat - lat, location.lon - lon)
+    }
+
+    private fun toPeriodWeather(location: Location, date: LocalDate, period: DayPeriod, observations: List<Observation>?): PeriodWeather {
+        if (observations.isNullOrEmpty()) {
+            return PeriodWeather(location.name, date, period, 0.0, 0.0, 0.0, 0.0, !date.isAfter(LocalDate.now()))
+        }
+        return PeriodWeather(
+            location.name,
+            date,
+            period,
+            observations.minOf { it.tempC },
+            observations.maxOf { it.tempC },
+            observations.sumOf { it.precipitationMm },
+            observations.maxOf { it.windKmh },
+            !date.isAfter(LocalDate.now()),
+        )
+    }
 
     private fun periodFor(location: Location, dateTime: LocalDateTime): DayPeriod {
         val sunrise = daylightTime(location, dateTime.toLocalDate(), true)
@@ -78,10 +124,18 @@ class EcccWeatherClient {
         val cosH = (cos(zenith) - sinDec * sin(Math.toRadians(location.lat))) / (cosDec * cos(Math.toRadians(location.lat)))
         val h = (if (sunrise) 360 - Math.toDegrees(acos(cosH)) else Math.toDegrees(acos(cosH))) / 15.0
         val utc = (h + ra - (0.06571 * approx) - 6.622 - lngHour + 24) % 24
-        val local = (utc - 7 + 24) % 24
-        val hour = local.toInt()
-        val minute = floor((local % 1) * 60).toInt().coerceIn(0, 59)
-        return LocalTime.of(hour, minute)
+        return date.atStartOfDay(ZoneOffset.UTC)
+            .plusMinutes((utc * 60).toLong())
+            .withZoneSameInstant(BC_ZONE)
+            .toLocalTime()
+            .withSecond(0)
+            .withNano(0)
+    }
+
+    private data class Observation(val time: LocalDateTime, val tempC: Double, val precipitationMm: Double, val windKmh: Double)
+
+    private companion object {
+        val BC_ZONE: ZoneId = ZoneId.of("America/Vancouver")
     }
 
     private fun syntheticEmpty(location: Location, start: LocalDate, end: LocalDate): List<PeriodWeather> = generateSequence(start) { it.plusDays(1).takeIf { d -> !d.isAfter(end) } }
