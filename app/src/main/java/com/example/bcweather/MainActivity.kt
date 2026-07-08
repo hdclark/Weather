@@ -79,23 +79,23 @@ class MainActivity : Activity() {
             .take(3)
             .map { it.date to it.period }
             .toSet()
-        rows.forEach {
-            val lowHigh = if (it.available) "%.0f/%.0f".format(it.lowC, it.highC) else "—"
-            val rain = if (it.available) "%.1f".format(it.precipitationMm) else "—"
-            val wind = if (it.available) "%.0f".format(it.maxWindKmh) else "—"
-            val status = if (it.observed) "Observed" else if (it.available) "Forecast" else "Unavailable"
+        rows.forEach { weather ->
+            val lowHigh = if (weather.available) "%.0f/%.0f".format(weather.lowC, weather.highC) else "—"
+            val rain = if (weather.available) "%.1f".format(weather.precipitationMm) else "—"
+            val wind = if (weather.available) "%.0f".format(weather.maxWindKmh) else "—"
+            val status = if (weather.observed) "Observed" else if (weather.available) "Forecast" else "Unavailable"
             table.addView(
                 row(
-                    it.date.format(DateTimeFormatter.ofPattern("MMM d")),
-                    it.period.label,
+                    weather.date.format(DateTimeFormatter.ofPattern("MMM d")),
+                    weather.period.label,
                     lowHigh,
                     rain,
                     wind,
                     status,
-                    highlightRow = it.date to it.period in highlightedTimePoints,
+                    highlightRow = weather.date to weather.period in highlightedTimePoints,
                     highlightedCellIndexes = setOfNotNull(
-                        3.takeIf { it.available && it.precipitationMm > 1.0 },
-                        4.takeIf { it.available && it.maxWindKmh > 10.0 },
+                        3.takeIf { weather.available && weather.precipitationMm > 1.0 },
+                        4.takeIf { weather.available && weather.maxWindKmh > 10.0 },
                     ),
                 )
             )

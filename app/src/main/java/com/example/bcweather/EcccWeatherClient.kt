@@ -18,7 +18,7 @@ class EcccWeatherClient {
         val start = today.minusDays(3)
         val end = today.plusDays(3)
         val observedRows = fetchObserved(location, start, today)
-        val forecastRows = fetchForecast(location, today, end)
+        val forecastRows = runCatching { fetchForecast(location, today, end) }.getOrElse { emptyList() }
         return mergeRows(location, start, end, observedRows, forecastRows)
     }
 
@@ -48,11 +48,13 @@ class EcccWeatherClient {
         val forecasts = best.optJSONObject("properties")?.optJSONObject("forecastGroup")?.optJSONArray("forecasts") ?: return emptyList()
         val rows = mutableListOf<PeriodWeather>()
         var currentDate = start
+        var sawDayPeriod = false
+        var previousWasNight = false
         for (i in 0 until forecasts.length()) {
             val f = forecasts.getJSONObject(i)
             val name = f.optJSONObject("period")?.optJSONObject("textForecastName")?.optString("en").orEmpty().lowercase()
             val isNight = name.contains("night") || name.contains("tonight")
-            if (i > 0 && !isNight) currentDate = currentDate.plusDays(1)
+            if (!isNight && previousWasNight && sawDayPeriod) currentDate = currentDate.plusDays(1)
             if (currentDate.isAfter(end)) break
             val temp = forecastTemperature(f)
             val wind = forecastMaxWindKmh(f)
@@ -60,6 +62,8 @@ class EcccWeatherClient {
             temp?.let { value ->
                 rows.add(PeriodWeather(location.name, currentDate, if (isNight) DayPeriod.OVERNIGHT else DayPeriod.AFTERNOON_EVENING, value, value, rain, wind, observed = false, available = true))
             }
+            if (!isNight) sawDayPeriod = true
+            previousWasNight = isNight
         }
         return rows
     }
@@ -75,7 +79,7 @@ class EcccWeatherClient {
     private fun forecastTemperature(forecast: JSONObject): Double? {
         val temperatures = forecast.optJSONObject("temperatures") ?: return null
         listOf("temperature", "temp_high", "temp_low").forEach { key ->
-            localizedNumber(temperatures.optJSONObject(key))?.let { return it }
+            firstLocalizedNumber(temperatures.opt(key))?.let { return it }
         }
         return null
     }
@@ -100,11 +104,18 @@ class EcccWeatherClient {
             ?: forecast.optJSONObject("precipitations")
             ?: forecast.optJSONObject("accumulation")
         localizedNumber(accumulation)?.let { return it }
+        firstLocalizedNumber(accumulation?.optJSONObject("accumulation")?.opt("amount"))?.let { return it }
         listOf("amount", "rain", "snow", "precipitation").forEach { key ->
-            localizedNumber(accumulation?.optJSONObject(key))?.let { return it }
+            firstLocalizedNumber(accumulation?.opt(key))?.let { return it }
         }
         val summary = forecast.optJSONObject("textSummary")?.optString("en").orEmpty()
         return Regex("(?i)(\\d+(?:\\.\\d+)?)\\s*mm\\b").find(summary)?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
+    }
+
+    private fun firstLocalizedNumber(value: Any?): Double? = when (value) {
+        is JSONObject -> localizedNumber(value) ?: value.keys().asSequence().firstNotNullOfOrNull { key -> firstLocalizedNumber(value.opt(key)) }
+        is org.json.JSONArray -> (0 until value.length()).asSequence().firstNotNullOfOrNull { index -> firstLocalizedNumber(value.opt(index)) }
+        else -> null
     }
 
     private fun localizedNumber(obj: JSONObject?): Double? = obj
