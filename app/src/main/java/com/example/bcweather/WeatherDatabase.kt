@@ -19,7 +19,10 @@ class WeatherDatabase(context: Context) : SQLiteOpenHelper(context, "weather_per
         db.execSQL("CREATE TABLE refresh_state(location TEXT PRIMARY KEY, refreshed_at_ms INTEGER NOT NULL)")
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion < 2) db.execSQL("ALTER TABLE period_weather ADD COLUMN available INTEGER NOT NULL DEFAULT 1")
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE period_weather ADD COLUMN available INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("UPDATE period_weather SET available = observed")
+        }
     }
 
     fun replace(location: String, rows: List<PeriodWeather>) {
