@@ -14,12 +14,17 @@ import kotlin.math.*
 
 class EcccWeatherClient {
     fun fetch(location: Location): List<PeriodWeather> {
-        val start = LocalDate.now(BC_ZONE).minusDays(3)
-        val end = LocalDate.now(BC_ZONE).plusDays(3)
+        val today = LocalDate.now(BC_ZONE)
+        val start = today.minusDays(3)
+        val end = today.plusDays(3)
+        val observedRows = fetchObserved(location, start, today)
+        val forecastRows = runCatching { fetchForecast(location, today, end) }.getOrElse { emptyList() }
+        return mergeRows(location, start, end, observedRows, forecastRows)
+    }
+
+    private fun fetchObserved(location: Location, start: LocalDate, end: LocalDate): List<PeriodWeather> {
         val startUtc = start.atStartOfDay(BC_ZONE).withZoneSameInstant(ZoneOffset.UTC)
         val endUtc = end.plusDays(1).atStartOfDay(BC_ZONE).minusNanos(1).withZoneSameInstant(ZoneOffset.UTC)
-        // MSC GeoMet OGC API Features endpoint. The app requests hourly temperature, precipitation,
-        // and wind values near the selected BC coordinate, then aggregates them into daylight-aware periods.
         val pages = mutableListOf<String>()
         var offset = 0
         do {
@@ -30,6 +35,93 @@ class EcccWeatherClient {
         } while (featureCount == PAGE_LIMIT)
         return parseGeoJson(location, pages, start, end)
     }
+
+    private fun fetchForecast(location: Location, start: LocalDate, end: LocalDate): List<PeriodWeather> {
+        val url = URL("https://api.weather.gc.ca/collections/citypageweather-realtime/items?f=json&limit=500&bbox=${location.lon - 1.0},${location.lat - 1.0},${location.lon + 1.0},${location.lat + 1.0}")
+        val text = (url.openConnection() as HttpURLConnection).run {
+            connectTimeout = 15000; readTimeout = 20000; requestMethod = "GET"
+            inputStream.bufferedReader().use(BufferedReader::readText)
+        }
+        val features = JSONObject(text).optJSONArray("features") ?: return emptyList()
+        val best = (0 until features.length()).map { features.getJSONObject(it) }
+            .minByOrNull { stationDistance(location, it) ?: Double.MAX_VALUE } ?: return emptyList()
+        val forecasts = best.optJSONObject("properties")?.optJSONObject("forecastGroup")?.optJSONArray("forecasts") ?: return emptyList()
+        val rows = mutableListOf<PeriodWeather>()
+        var currentDate = start
+        var sawDayPeriod = false
+        var previousWasNight = false
+        for (i in 0 until forecasts.length()) {
+            val f = forecasts.getJSONObject(i)
+            val name = f.optJSONObject("period")?.optJSONObject("textForecastName")?.optString("en").orEmpty().lowercase()
+            val isNight = name.contains("night") || name.contains("tonight")
+            if (!isNight && previousWasNight && sawDayPeriod) currentDate = currentDate.plusDays(1)
+            if (currentDate.isAfter(end)) break
+            val temp = forecastTemperature(f)
+            val wind = forecastMaxWindKmh(f)
+            val rain = forecastPrecipitationMm(f)
+            temp?.let { value ->
+                rows.add(PeriodWeather(location.name, currentDate, if (isNight) DayPeriod.OVERNIGHT else DayPeriod.AFTERNOON_EVENING, value, value, rain, wind, observed = false, available = true))
+            }
+            if (!isNight) sawDayPeriod = true
+            previousWasNight = isNight
+        }
+        return rows
+    }
+
+    private fun mergeRows(location: Location, start: LocalDate, end: LocalDate, observedRows: List<PeriodWeather>, forecastRows: List<PeriodWeather>): List<PeriodWeather> {
+        val byKey = forecastRows.associateBy { it.date to it.period }.toMutableMap()
+        observedRows.filter { it.available }.forEach { byKey[it.date to it.period] = it }
+        return generateSequence(start) { it.plusDays(1).takeIf { d -> !d.isAfter(end) } }
+            .flatMap { date -> DayPeriod.entries.map { period -> byKey[date to period] ?: PeriodWeather(location.name, date, period, 0.0, 0.0, 0.0, 0.0, observed = false, available = false) } }
+            .toList()
+    }
+
+    private fun forecastTemperature(forecast: JSONObject): Double? {
+        val temperatures = forecast.optJSONObject("temperatures") ?: return null
+        listOf("temperature", "temp_high", "temp_low").forEach { key ->
+            firstLocalizedNumber(temperatures.opt(key))?.let { return it }
+        }
+        return null
+    }
+
+    private fun forecastMaxWindKmh(forecast: JSONObject): Double {
+        val periods = forecast.optJSONObject("winds")?.opt("periods") ?: return 0.0
+        val periodObjects = when (periods) {
+            is org.json.JSONArray -> (0 until periods.length()).map { periods.getJSONObject(it) }
+            is JSONObject -> listOf(periods)
+            else -> emptyList()
+        }
+        return periodObjects.maxOfOrNull { period ->
+            listOfNotNull(
+                localizedNumber(period.optJSONObject("speed")),
+                localizedNumber(period.optJSONObject("gust")),
+            ).maxOrNull() ?: 0.0
+        } ?: 0.0
+    }
+
+    private fun forecastPrecipitationMm(forecast: JSONObject): Double {
+        val accumulation = forecast.optJSONObject("precipitation")
+            ?: forecast.optJSONObject("precipitations")
+            ?: forecast.optJSONObject("accumulation")
+        localizedNumber(accumulation)?.let { return it }
+        firstLocalizedNumber(accumulation?.optJSONObject("accumulation")?.opt("amount"))?.let { return it }
+        listOf("amount", "rain", "snow", "precipitation").forEach { key ->
+            firstLocalizedNumber(accumulation?.opt(key))?.let { return it }
+        }
+        val summary = forecast.optJSONObject("textSummary")?.optString("en").orEmpty()
+        return Regex("(?i)(\\d+(?:\\.\\d+)?)\\s*mm\\b").find(summary)?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
+    }
+
+    private fun firstLocalizedNumber(value: Any?): Double? = when (value) {
+        is JSONObject -> localizedNumber(value) ?: value.keys().asSequence().firstNotNullOfOrNull { key -> firstLocalizedNumber(value.opt(key)) }
+        is org.json.JSONArray -> (0 until value.length()).asSequence().firstNotNullOfOrNull { index -> firstLocalizedNumber(value.opt(index)) }
+        else -> null
+    }
+
+    private fun localizedNumber(obj: JSONObject?): Double? = obj
+        ?.optJSONObject("value")
+        ?.optDouble("en", Double.NaN)
+        ?.takeUnless { it.isNaN() }
 
     private fun fetchPage(location: Location, startUtc: java.time.ZonedDateTime, endUtc: java.time.ZonedDateTime, offset: Int): String {
         val url = URL("https://api.weather.gc.ca/collections/climate-hourly/items?f=json&limit=$PAGE_LIMIT&offset=$offset&bbox=${location.lon - .25},${location.lat - .25},${location.lon + .25},${location.lat + .25}&datetime=${DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(startUtc)}/${DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(endUtc)}")
@@ -155,6 +247,4 @@ class EcccWeatherClient {
         const val PAGE_LIMIT = 500
     }
 
-    private fun syntheticEmpty(location: Location, start: LocalDate, end: LocalDate): List<PeriodWeather> = generateSequence(start) { it.plusDays(1).takeIf { d -> !d.isAfter(end) } }
-        .flatMap { d -> DayPeriod.entries.map { p -> PeriodWeather(location.name, d, p, 0.0, 0.0, 0.0, 0.0, false) } }.toList()
 }
