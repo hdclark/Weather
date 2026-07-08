@@ -20,7 +20,8 @@ class WeatherDatabase(context: Context) : SQLiteOpenHelper(context, "weather_per
     }
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
 
-    fun replace(location: String, rows: List<PeriodWeather>) = writableDatabase.use { db ->
+    fun replace(location: String, rows: List<PeriodWeather>) {
+        val db = writableDatabase
         db.beginTransaction()
         try {
             db.delete("period_weather", "location=?", arrayOf(location))
@@ -39,11 +40,11 @@ class WeatherDatabase(context: Context) : SQLiteOpenHelper(context, "weather_per
     fun refreshedAt(location: String): Long = readableDatabase.rawQuery("SELECT refreshed_at_ms FROM refresh_state WHERE location=?", arrayOf(location)).use { if (it.moveToFirst()) it.getLong(0) else 0L }
 
     fun load(location: String): List<PeriodWeather> = readableDatabase.rawQuery(
-        "SELECT date, period, low_c, high_c, precipitation_mm, max_wind_kmh, observed FROM period_weather WHERE location=? ORDER BY date, period",
+        "SELECT date, period, low_c, high_c, precipitation_mm, max_wind_kmh, observed FROM period_weather WHERE location=? ORDER BY date, CASE period WHEN 'OVERNIGHT' THEN 0 WHEN 'MORNING' THEN 1 WHEN 'AFTERNOON_EVENING' THEN 2 ELSE 3 END",
         arrayOf(location)
     ).use { c -> buildList { while (c.moveToNext()) add(PeriodWeather(location, LocalDate.parse(c.getString(0)), DayPeriod.valueOf(c.getString(1)), c.getDouble(2), c.getDouble(3), c.getDouble(4), c.getDouble(5), c.getInt(6) == 1)) } }
 
-    fun exportCsv(): String = readableDatabase.rawQuery("SELECT location,date,period,low_c,high_c,precipitation_mm,max_wind_kmh,observed FROM period_weather ORDER BY location,date,period", null).use { c ->
+    fun exportCsv(): String = readableDatabase.rawQuery("SELECT location,date,period,low_c,high_c,precipitation_mm,max_wind_kmh,observed FROM period_weather ORDER BY location,date,CASE period WHEN 'OVERNIGHT' THEN 0 WHEN 'MORNING' THEN 1 WHEN 'AFTERNOON_EVENING' THEN 2 ELSE 3 END", null).use { c ->
         buildString {
             appendLine("location,date,period,low_c,high_c,precipitation_mm,max_wind_kmh,observed")
             while (c.moveToNext()) appendLine((0 until c.columnCount).joinToString(",") { c.getString(it) })

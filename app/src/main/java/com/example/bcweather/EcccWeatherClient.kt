@@ -20,31 +20,44 @@ class EcccWeatherClient {
         val endUtc = end.plusDays(1).atStartOfDay(BC_ZONE).minusNanos(1).withZoneSameInstant(ZoneOffset.UTC)
         // MSC GeoMet OGC API Features endpoint. The app requests hourly temperature, precipitation,
         // and wind values near the selected BC coordinate, then aggregates them into daylight-aware periods.
-        val url = URL("https://api.weather.gc.ca/collections/climate-hourly/items?f=json&limit=500&bbox=${location.lon - .25},${location.lat - .25},${location.lon + .25},${location.lat + .25}&datetime=${DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(startUtc)}/${DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(endUtc)}")
-        val text = (url.openConnection() as HttpURLConnection).run {
+        val pages = mutableListOf<String>()
+        var offset = 0
+        do {
+            val text = fetchPage(location, startUtc, endUtc, offset)
+            pages.add(text)
+            val featureCount = JSONObject(text).optJSONArray("features")?.length() ?: 0
+            offset += PAGE_LIMIT
+        } while (featureCount == PAGE_LIMIT)
+        return parseGeoJson(location, pages, start, end)
+    }
+
+    private fun fetchPage(location: Location, startUtc: java.time.ZonedDateTime, endUtc: java.time.ZonedDateTime, offset: Int): String {
+        val url = URL("https://api.weather.gc.ca/collections/climate-hourly/items?f=json&limit=$PAGE_LIMIT&offset=$offset&bbox=${location.lon - .25},${location.lat - .25},${location.lon + .25},${location.lat + .25}&datetime=${DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(startUtc)}/${DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(endUtc)}")
+        return (url.openConnection() as HttpURLConnection).run {
             connectTimeout = 15000; readTimeout = 20000; requestMethod = "GET"
             inputStream.bufferedReader().use(BufferedReader::readText)
         }
-        return parseGeoJson(location, text, start, end)
     }
 
-    private fun parseGeoJson(location: Location, json: String, start: LocalDate, end: LocalDate): List<PeriodWeather> {
-        val features = JSONObject(json).optJSONArray("features") ?: return syntheticEmpty(location, start, end)
+    private fun parseGeoJson(location: Location, pages: List<String>, start: LocalDate, end: LocalDate): List<PeriodWeather> {
         val observationsByStation = mutableMapOf<String, MutableList<Observation>>()
         val distancesByStation = mutableMapOf<String, Double>()
-        for (i in 0 until features.length()) {
-            val feature = features.getJSONObject(i)
-            val p = feature.optJSONObject("properties") ?: continue
-            val timeText = p.optString("LOCAL_DATE", p.optString("datetime", p.optString("time")))
-            val time = parseObservationTime(timeText) ?: continue
-            if (time.toLocalDate().isBefore(start) || time.toLocalDate().isAfter(end)) continue
-            val temp = firstNumber(p, "TEMP", "AIR_TEMPERATURE", "temperature") ?: continue
-            val precip = firstNumber(p, "PRECIP_AMOUNT", "TOTAL_PRECIPITATION", "precipitation") ?: continue
-            val wind = firstNumber(p, "WIND_SPEED", "wind_speed") ?: continue
-            val station = stationKey(p, feature, i)
-            observationsByStation.getOrPut(station) { mutableListOf() }.add(Observation(time, temp, precip, wind))
-            stationDistance(location, feature)?.let { distance ->
-                distancesByStation[station] = minOf(distancesByStation[station] ?: Double.MAX_VALUE, distance)
+        pages.forEach { json ->
+            val features = JSONObject(json).optJSONArray("features") ?: return@forEach
+            for (i in 0 until features.length()) {
+                val feature = features.getJSONObject(i)
+                val p = feature.optJSONObject("properties") ?: continue
+                val timeText = p.optString("LOCAL_DATE", p.optString("datetime", p.optString("time")))
+                val time = parseObservationTime(timeText) ?: continue
+                if (time.toLocalDate().isBefore(start) || time.toLocalDate().isAfter(end)) continue
+                val temp = firstNumber(p, "TEMP", "AIR_TEMPERATURE", "temperature") ?: continue
+                val precip = firstNumber(p, "PRECIP_AMOUNT", "TOTAL_PRECIPITATION", "precipitation") ?: continue
+                val wind = firstNumber(p, "WIND_SPEED", "wind_speed") ?: continue
+                val station = stationKey(p, feature, i)
+                observationsByStation.getOrPut(station) { mutableListOf() }.add(Observation(time, temp, precip, wind))
+                stationDistance(location, feature)?.let { distance ->
+                    distancesByStation[station] = minOf(distancesByStation[station] ?: Double.MAX_VALUE, distance)
+                }
             }
         }
         val stationObservations = observationsByStation.entries
@@ -139,6 +152,7 @@ class EcccWeatherClient {
 
     private companion object {
         val BC_ZONE: ZoneId = ZoneId.of("America/Vancouver")
+        const val PAGE_LIMIT = 500
     }
 
     private fun syntheticEmpty(location: Location, start: LocalDate, end: LocalDate): List<PeriodWeather> = generateSequence(start) { it.plusDays(1).takeIf { d -> !d.isAfter(end) } }

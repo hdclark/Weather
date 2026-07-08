@@ -22,7 +22,7 @@ class MainActivity : Activity() {
         val scroll = ScrollView(this).apply { addView(content) }
         val spinner = Spinner(this).apply { adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, Locations.all.map { it.name }) }
         status = TextView(this)
-        table = TableLayout(this).apply { stretchAllColumns = true; shrinkAllColumns = true }
+        table = TableLayout(this).apply { setStretchAllColumns(true); setShrinkAllColumns(true) }
         val export = Button(this).apply { text = "Export historical CSV"; setOnClickListener { exportCsv() } }
         content.addView(spinner); content.addView(status); content.addView(table); content.addView(export)
         root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT))
@@ -59,8 +59,14 @@ class MainActivity : Activity() {
 
     private fun render(rows: List<PeriodWeather>) {
         table.removeAllViews()
-        table.addView(row("Date", "Period", "Low/High °C", "Rain mm", "Wind km/h", header = true))
-        rows.forEach { table.addView(row(it.date.format(DateTimeFormatter.ofPattern("MMM d")), it.period.label, "%.0f/%.0f".format(it.lowC, it.highC), "%.1f".format(it.precipitationMm), "%.0f".format(it.maxWindKmh))) }
+        table.addView(row("Date", "Period", "Low/High °C", "Rain mm", "Wind km/h", "Status", header = true))
+        rows.forEach {
+            val lowHigh = if (it.observed) "%.0f/%.0f".format(it.lowC, it.highC) else "—"
+            val rain = if (it.observed) "%.1f".format(it.precipitationMm) else "—"
+            val wind = if (it.observed) "%.0f".format(it.maxWindKmh) else "—"
+            val status = if (it.observed) "Observed" else "Unavailable"
+            table.addView(row(it.date.format(DateTimeFormatter.ofPattern("MMM d")), it.period.label, lowHigh, rain, wind, status))
+        }
         if (rows.isEmpty()) status.text = "No cached data for ${selected.name}; refresh will run automatically."
     }
 
