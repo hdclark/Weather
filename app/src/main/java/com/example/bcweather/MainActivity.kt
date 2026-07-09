@@ -22,6 +22,7 @@ class MainActivity : Activity() {
     private lateinit var surreySummary: TextView
     private lateinit var swipeRefresh: SwipeRefreshLayout
     private var selected = Locations.all.first()
+    private val refreshGeneration = AtomicInteger(0)
 
     private val darkBackground = Color.parseColor("#0B1120")
     private val darkSurface = Color.parseColor("#111827")
@@ -51,8 +52,8 @@ class MainActivity : Activity() {
         val spinner = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_item, Locations.all.map { it.name }).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
             setBackgroundColor(elevatedSurface)
-            minimumHeight = 72
-            setPadding(12, 16, 12, 16)
+            minimumHeight = dp(80)
+            setPadding(dp(12), dp(20), dp(12), dp(20))
         }
         status = TextView(this).apply { setTextColor(mutedText); textSize = 16f; setPadding(0, 16, 0, 10) }
         surreySummary = TextView(this).apply {
@@ -69,14 +70,14 @@ class MainActivity : Activity() {
             addView(export, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = 8 })
             addView(refresh, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = 8 })
         }
-        content.addView(spinner, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 88))
+        content.addView(spinner, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(96)))
         content.addView(status)
         content.addView(surreySummary, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
         content.addView(table)
         content.addView(actions)
         root.addView(swipeRefresh, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT))
         setContentView(root)
-        renderSurreySummary()
+        renderLocationSummary()
         spinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
                 (view as? TextView)?.setTextColor(lightText)
@@ -89,39 +90,47 @@ class MainActivity : Activity() {
 
     private fun loadAndRefresh() {
         render(db.load(selected.name))
-        renderSurreySummary()
+        renderLocationSummary()
         val staleLocations = Locations.all.filter { System.currentTimeMillis() - db.refreshedAt(it.name) > 60 * 60 * 1000 }
         if (staleLocations.isNotEmpty()) refreshAllLocations(staleLocations)
     }
 
     private fun refreshAllLocations(locations: List<Location> = Locations.all) {
-        val orderedLocations = locations.sortedBy { if (it == selected) 0 else 1 }
-        status.text = "Refreshing ${selected.name} first, then all locations…"
+        val targetLocations = locations.distinct()
+        if (targetLocations.isEmpty()) return
+        val selectedAtStart = selected
+        val generation = refreshGeneration.incrementAndGet()
+        val orderedLocations = targetLocations.sortedBy { if (it == selectedAtStart) 0 else 1 }
+        status.text = "Refreshing ${selectedAtStart.name} first, then other locations…"
         swipeRefresh.isRefreshing = true
-        val remaining = AtomicInteger(orderedLocations.size)
-        val failures = mutableListOf<String>()
-        orderedLocations.forEach { location ->
-            thread {
-                runCatching { EcccWeatherClient().fetch(location) }
-                    .onSuccess { rows ->
-                        db.replace(location.name, rows)
-                        runOnUiThread {
-                            if (selected == location) {
-                                status.text = "Updated ${location.name}; continuing other locations…"
-                                render(db.load(location.name))
-                            }
-                            if (location.name == SURREY_NAME) renderSurreySummary()
+        thread {
+            val failures = mutableListOf<String>()
+            orderedLocations.forEachIndexed { index, location ->
+                try {
+                    val rows = EcccWeatherClient().fetch(location)
+                    db.replace(location.name, rows)
+                    runOnUiThread {
+                        if (selected == location) {
+                            val suffix = if (index == orderedLocations.lastIndex) "" else "; continuing other locations…"
+                            status.text = "Updated ${location.name}$suffix"
+                            render(db.load(location.name))
+                            renderLocationSummary()
                         }
+                        if (location.name == SURREY_NAME) WeatherSummaryWidget.updateAll(this@MainActivity)
                     }
-                    .onFailure { e -> synchronized(failures) { failures.add("${location.name}: ${e.message}") } }
-                    .also {
-                        if (remaining.decrementAndGet() == 0) runOnUiThread {
-                            swipeRefresh.isRefreshing = false
-                            render(db.load(selected.name))
-                            renderSurreySummary()
-                            status.text = if (failures.isEmpty()) "Updated all locations" else "Refresh completed with ${failures.size} issue(s)"
-                        }
-                    }
+                } catch (e: Exception) {
+                    synchronized(failures) { failures.add("${location.name}: ${e.message}") }
+                }
+                if (refreshGeneration.get() != generation) return@thread
+            }
+            runOnUiThread {
+                if (refreshGeneration.get() == generation) {
+                    swipeRefresh.isRefreshing = false
+                    render(db.load(selected.name))
+                    renderLocationSummary()
+                    WeatherSummaryWidget.updateAll(this@MainActivity)
+                    status.text = if (failures.isEmpty()) "Updated all locations" else "Refresh completed with ${failures.size} issue(s)"
+                }
             }
         }
     }
@@ -141,13 +150,12 @@ class MainActivity : Activity() {
         if (rows.isEmpty()) status.text = "No cached data for ${selected.name}; refresh will run automatically."
     }
 
-    private fun renderSurreySummary() {
-        val currentTimePoint = currentTimePoint()
-        val nextRows = db.load(SURREY_NAME).filter { it.available && isAtOrAfter(it.date to it.period, currentTimePoint) }.take(3)
-        surreySummary.text = if (nextRows.isEmpty()) {
-            "Surrey next 24h\nNo cached data yet. Pull down or tap Refresh data."
+    private fun renderLocationSummary() {
+        val nextRows = next24HourRows(db.load(selected.name))
+        surreySummary.text = if (nextRows.none { it.available }) {
+            "${selected.name} next 24h\nNo cached data yet. Pull down or tap Refresh data."
         } else {
-            "Surrey next 24h\nTemperature: %.0f–%.0f °C\nPrecipitation: %.1f mm\nMax wind: %.0f km/h".format(nextRows.minOf { it.lowC }, nextRows.maxOf { it.highC }, nextRows.sumOf { it.precipitationMm }, nextRows.maxOf { it.maxWindKmh })
+            "${selected.name} next 24h\n${formatWeatherSummary(nextRows)}"
         }
     }
 
@@ -185,6 +193,8 @@ class MainActivity : Activity() {
             Toast.makeText(this, "Exported weather history", Toast.LENGTH_SHORT).show()
         }
     }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private companion object { const val SURREY_NAME = "Surrey" }
 }
