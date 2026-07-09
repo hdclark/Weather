@@ -1,1 +1,4 @@
-<resources><string name="app_name">BC Weather Periods</string></resources>
+<resources>
+    <string name="app_name">BC Weather Periods</string>
+    <string name="widget_description">Surrey 24 hour weather summary</string>
+</resources>

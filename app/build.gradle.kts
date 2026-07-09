@@ -6,3 +6,6 @@ android { namespace = "com.example.bcweather"; compileSdk = 35
 }
 
 kotlin { jvmToolchain(21) }
+
+
+dependencies { implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0") }
